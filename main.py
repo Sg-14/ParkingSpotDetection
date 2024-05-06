@@ -1,82 +1,104 @@
-
 import cv2
-from utilities import get_parking_spots, checkBlockStatus
 import numpy as np
-
-def calc_diff(im1, im2):
-    return np.abs(np.mean(im1) - np.mean(im2))
-
-
-mask = 'ParkingLotVideo/mask_1920_1080.png'
-video_path = 'ParkingLotVideo/parking_1920_1080_loop.mp4'
+import tkinter as tk
+from PIL import Image, ImageTk
+from utilities import get_parking_spots, checkBlockStatus
 
 
-mask = cv2.imread(mask, 0)
+class ParkingSpotGUI:
+    def __init__(self, mask_path, video_path):
+        self.mask = cv2.imread(mask_path, 0)
+        self.cap = cv2.VideoCapture(video_path)
+        self.connected_components = cv2.connectedComponentsWithStats(self.mask, 4, cv2.CV_32S)
+        self.spots = get_parking_spots(self.connected_components)
+        self.spots_status = [None for _ in self.spots]
+        self.diffs = [None for _ in self.spots]
+        self.previous_frame = None
+        self.frame_number = 0
+        self.step = 20
 
-cap = cv2.VideoCapture(video_path)
+        self.video_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        self.video_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        self.aspect_ratio = self.video_width / self.video_height
 
-connected_components = cv2.connectedComponentsWithStats(mask, 4, cv2.CV_32S)
+        # Set canvas width based on aspect ratio
+        self.canvas_width = 800
+        self.canvas_height = int(self.canvas_width / self.aspect_ratio)
 
-spots = get_parking_spots(connected_components)
+        self.root = tk.Tk()
+        self.root.title("Parking Spot Video Display")
 
-spots_status = [None for j in spots]
-diffs = [None for j in spots]
+        self.canvas = tk.Canvas(self.root, width=self.canvas_width, height=self.canvas_height)
+        self.canvas.pack()
 
-previous_frame = None
+        self.update()
 
-frame_nmr = 0
-ret = True
-step = 20
-while ret:
-    ret, frame = cap.read()
+    def calc_diff(self, im1, im2):
+        return np.abs(np.mean(im1) - np.mean(im2))
 
-    if frame_nmr % step == 0 and previous_frame is not None:
-        for spot_indx, spot in enumerate(spots):
+    def update(self):
+        ret, frame = self.cap.read()
+
+        if not ret:
+            self.root.quit()
+            return
+
+        if self.frame_number % self.step == 0 and self.previous_frame is not None:
+            for spot_indx, spot in enumerate(self.spots):
+                x1, y1, w, h = spot
+                spot_crop = frame[y1:y1 + h, x1:x1 + w, :]
+                self.diffs[spot_indx] = self.calc_diff(spot_crop, self.previous_frame[y1:y1 + h, x1:x1 + w, :])
+
+        if self.frame_number % self.step == 0:
+            if self.previous_frame is None:
+                arr_ = range(len(self.spots))
+            else:
+                arr_ = [j for j in np.argsort(self.diffs) if self.diffs[j] / np.amax(self.diffs) > 0.4]
+            for spot_indx in arr_:
+                spot = self.spots[spot_indx]
+                x1, y1, w, h = spot
+                spot_crop = frame[y1:y1 + h, x1:x1 + w, :]
+                spot_status = checkBlockStatus(spot_crop)
+                self.spots_status[spot_indx] = spot_status
+
+        if self.frame_number % self.step == 0:
+            self.previous_frame = frame.copy()
+
+        for spot_indx, spot in enumerate(self.spots):
+            spot_status = self.spots_status[spot_indx]
             x1, y1, w, h = spot
 
-            spot_crop = frame[y1:y1 + h, x1:x1 + w, :]
+            if spot_status:
+                frame = cv2.rectangle(frame, (x1, y1), (x1 + w, y1 + h), (255, 255, 0), 2)
+            else:
+                frame = cv2.rectangle(frame, (x1, y1), (x1 + w, y1 + h), (0, 0, 255), 2)
 
-            diffs[spot_indx] = calc_diff(spot_crop, previous_frame[y1:y1 + h, x1:x1 + w, :])
+        cv2.rectangle(frame, (80, 20), (550, 80), (0, 0, 0), -1)
+        cv2.putText(frame, 'Available spots: {} / {}'.format(str(sum(self.spots_status)), str(len(self.spots_status))),
+                    (100, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-        print([diffs[j] for j in np.argsort(diffs)][::-1])
+        # Resize frame to fit the canvas
+        frame = cv2.resize(frame, (self.canvas_width, self.canvas_height))
 
-    if frame_nmr % step == 0:
-        if previous_frame is None:
-            arr_ = range(len(spots))
-        else:
-            arr_ = [j for j in np.argsort(diffs) if diffs[j] / np.amax(diffs) > 0.4]
-        for spot_indx in arr_:
-            spot = spots[spot_indx]
-            x1, y1, w, h = spot
+        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        image = Image.fromarray(frame)
+        photo = ImageTk.PhotoImage(image=image)
 
-            spot_crop = frame[y1:y1 + h, x1:x1 + w, :]
+        self.canvas.create_image(0, 0, anchor=tk.NW, image=photo)
+        self.canvas.image = photo
 
-            spot_status = checkBlockStatus(spot_crop)
+        if cv2.waitKey(25) & 0xFF == ord('q'):
+            self.root.quit()
 
-            spots_status[spot_indx] = spot_status
+        self.frame_number += 1
+        self.root.after(25, self.update)
 
-    if frame_nmr % step == 0:
-        previous_frame = frame.copy()
 
-    for spot_indx, spot in enumerate(spots):
-        spot_status = spots_status[spot_indx]
-        x1, y1, w, h = spots[spot_indx]
 
-        if spot_status:
-            frame = cv2.rectangle(frame, (x1, y1), (x1 + w, y1 + h), (255, 255, 0), 2)
-        else:
-            frame = cv2.rectangle(frame, (x1, y1), (x1 + w, y1 + h), (0, 0, 255), 2)
+if __name__ == "__main__":
+    app = ParkingSpotGUI('ParkingLotVideo/mask_1920_1080.png', 'ParkingLotVideo/parking_1920_1080_loop.mp4')
+    status_window = tk.Tk()
+    status_window.title("Parking Spot Status") # Update status window periodically
+    status_window.mainloop()
 
-    cv2.rectangle(frame, (80, 20), (550, 80), (0, 0, 0), -1)
-    cv2.putText(frame, 'Available spots: {} / {}'.format(str(sum(spots_status)), str(len(spots_status))), (100, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-
-    cv2.namedWindow('frame', cv2.WINDOW_NORMAL)
-    cv2.imshow('frame', frame)
-    if cv2.waitKey(25) & 0xFF == ord('q'):
-        break
-
-    frame_nmr += 1
-
-cap.release()
-cv2.destroyAllWindows()
